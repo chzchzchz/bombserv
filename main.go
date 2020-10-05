@@ -17,7 +17,7 @@ import (
 
 var pAddr string
 var sizes = []int{128, 256, 512, 1024, 2048}
-var hdr200 = []byte("HTTP/1.1 200 OK\nContent-Encoding: gzip\n\n")
+var hdr200 = []byte("HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\r\nContent-Encoding: gzip\n\n")
 
 func makePayload(mb int) []byte {
 	log.Printf("making payload size %dMB\n", mb)
@@ -28,7 +28,7 @@ func makePayload(mb int) []byte {
 	}
 	defer gz.Close()
 	// Fill up a page's worth + plus overflow.
-	trashWord, trashBuf := []byte("corn0"), []byte{}
+	trashWord, trashBuf := []byte("&#x1f33d;"), []byte("<html><head><body>")
 	for len(trashBuf) < 4096 {
 		trashBuf = append(trashBuf, trashWord...)
 	}
