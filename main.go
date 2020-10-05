@@ -80,7 +80,7 @@ func sendFile(conn net.Conn) error {
 	return err
 }
 
-func bomb(conn net.Conn) {
+func bomb(conn net.Conn) error {
 	defer conn.Close()
 	log.Printf("serving %v", (conn.(*net.TCPConn)).RemoteAddr())
 
@@ -101,10 +101,10 @@ func bomb(conn net.Conn) {
 		hdr = hdr302
 	}
 	if _, err := conn.Write(hdr); err != nil {
-		panic(err)
+		return err
 	}
 	if err := sendFile(conn); err != nil {
-		panic(err)
+		return err
 	}
 
 	// Randomly sleep.
@@ -113,6 +113,7 @@ func bomb(conn net.Conn) {
 		log.Printf("sleeping %v", (conn.(*net.TCPConn)).RemoteAddr())
 		time.Sleep(20 * time.Second)
 	}
+	return nil
 }
 
 func main() {
@@ -134,6 +135,10 @@ func main() {
 			log.Println(err)
 			continue
 		}
-		go bomb(conn)
+		go func() {
+			if err := bomb(conn); err != nil {
+				log.Println("error:", err)
+			}
+		}()
 	}
 }
