@@ -97,7 +97,7 @@ func TestEncodingToExt(t *testing.T) {
 func TestGenerateJSON(t *testing.T) {
 	// 1MB produces n = 1*1024*1024/8 = 131072 nesting levels
 	var buf bytes.Buffer
-	generateJSON(&buf, 1)
+	GenerateJSON(&buf, 1)
 	if buf.Len() != 1*1024*1024 {
 		t.Errorf("generateJSON(1) size = %d, want %d", buf.Len(), 1*1024*1024)
 	}

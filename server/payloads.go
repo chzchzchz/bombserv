@@ -56,6 +56,10 @@ func MakePayloads() *Payloads {
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	var mu sync.Mutex
+
+	// Collect results locally to avoid concurrent map writes
+	last4Results := make(map[string][]byte)
 
 	for _, kind := range kinds {
 		gen := contentGenerator(kind)
@@ -71,7 +75,9 @@ func MakePayloads() *Payloads {
 						panic(err)
 					}
 					key := fmt.Sprintf("%dMB.%s.%s", vv, kind, pc.ext)
-					p.last4[key] = last4
+					mu.Lock()
+					last4Results[key] = last4
+					mu.Unlock()
 					<-sem
 				}(v)
 			}
@@ -79,6 +85,7 @@ func MakePayloads() *Payloads {
 	}
 
 	wg.Wait()
+	p.last4 = last4Results
 	slog.Info("done generating payloads")
 	return p
 }
@@ -86,7 +93,7 @@ func MakePayloads() *Payloads {
 func contentGenerator(kind string) func(io.Writer, int) error {
 	switch kind {
 	case "json":
-		return generateJSON
+		return GenerateJSON
 	default:
 		return fillPayload
 	}
@@ -213,7 +220,7 @@ func fillPayload(w io.Writer, mb int) error {
 	return nil
 }
 
-func generateJSON(w io.Writer, mb int) error {
+func GenerateJSON(w io.Writer, mb int) error {
 	n := mb * 1024 * 1024 / 8
 	if n < 1 {
 		n = 1
