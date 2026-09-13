@@ -17,11 +17,6 @@ type Server struct {
 	barrier  *barrier
 }
 
-type barrierConn struct {
-	conn     net.Conn
-	encoding string
-}
-
 type barrier struct {
 	mu   sync.Mutex
 	done chan struct{}
@@ -45,7 +40,7 @@ func (b *barrier) monitor() {
 	}
 }
 
-func (b *barrier) wait(conn net.Conn, encoding string) {
+func (b *barrier) wait(conn net.Conn) {
 	b.mu.Lock()
 	done := b.done
 	b.mu.Unlock()
@@ -76,15 +71,19 @@ func hdr302(pAddr string, tstr string, encoding string) []byte {
 }
 
 func sendFile(conn net.Conn, payloads *Payloads, encoding string, waitf func()) error {
-	fn := payloads.SelectFile(encoding)
-	f, err := os.Open(fn)
+	trimFn, last4 := payloads.SelectPayload(encoding)
+	f, err := os.Open(trimFn)
 	if err != nil {
 		return err
 	}
-	slog.Info("sending payload", "file", fn)
+	slog.Info("sending payload", "file", trimFn)
 	defer f.Close()
-	waitf()
 	_, err = (conn.(*net.TCPConn)).ReadFrom(f)
+	if err != nil {
+		return err
+	}
+	waitf()
+	_, err = conn.Write(last4)
 	return err
 }
 
@@ -101,16 +100,18 @@ func detectEncoding(buf []byte) string {
 	if endIdx > 0 && val[endIdx-1] == '\r' {
 		endIdx--
 	}
+	seen := make(map[string]bool)
 	for _, token := range strings.Split(strings.ToLower(string(val[:endIdx])), ",") {
-		token = strings.TrimSpace(token)
-		switch token {
-		case "zstd":
-			return "zstd"
-		case "br":
-			return "br"
-		case "gzip":
-			return "gzip"
-		}
+		seen[strings.TrimSpace(token)] = true
+	}
+	if seen["br"] {
+		return "br"
+	}
+	if seen["zstd"] {
+		return "zstd"
+	}
+	if seen["gzip"] {
+		return "gzip"
 	}
 	return "gzip"
 }
@@ -148,7 +149,7 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 	if randomSleep {
 		waitf = func() {}
 	} else {
-		waitf = func() { s.barrier.wait(conn, encoding) }
+		waitf = func() { s.barrier.wait(conn) }
 	}
 
 	if err := sendFile(conn, s.payloads, encoding, waitf); err != nil {
