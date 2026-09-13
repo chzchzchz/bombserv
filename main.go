@@ -21,7 +21,8 @@ func main() {
 		panic(err)
 	}
 	payloads := server.MakePayloads()
-	if err := server.Serve(ln, *paddrFlag, payloads); err != nil {
+	svc := server.NewServer(payloads)
+	if err := svc.Serve(ln, *paddrFlag); err != nil {
 		panic(err)
 	}
 }

@@ -8,8 +8,56 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
+
+type Server struct {
+	payloads *Payloads
+	barrier  *barrier
+}
+
+type barrierConn struct {
+	conn     net.Conn
+	encoding string
+}
+
+type barrier struct {
+	mu   sync.Mutex
+	done chan struct{}
+}
+
+func newBarrier() *barrier {
+	b := &barrier{done: make(chan struct{})}
+	go b.monitor()
+	return b
+}
+
+func (b *barrier) monitor() {
+	for {
+		time.Sleep(3 * time.Second)
+		c := b.done
+		nextc := make(chan struct{})
+		b.mu.Lock()
+		b.done = nextc
+		b.mu.Unlock()
+		close(c)
+	}
+}
+
+func (b *barrier) wait(conn net.Conn, encoding string) {
+	b.mu.Lock()
+	done := b.done
+	b.mu.Unlock()
+	<-done
+}
+
+func NewServer(payloads *Payloads) *Server {
+	return &Server{
+		payloads: payloads,
+		barrier:  newBarrier(),
+	}
+}
 
 func makeHeader(status, pAddr, tstr, encoding string) []byte {
 	loc := ""
@@ -66,7 +114,7 @@ func detectEncoding(buf []byte) string {
 	return "gzip"
 }
 
-func bomb(conn net.Conn, pAddr string, payloads *Payloads) error {
+func (s *Server) bomb(conn net.Conn, pAddr string) error {
 	defer conn.Close()
 	slog.Info("serving", "addr", (conn.(*net.TCPConn)).RemoteAddr())
 
@@ -90,7 +138,10 @@ func bomb(conn net.Conn, pAddr string, payloads *Payloads) error {
 	if _, err := conn.Write(hdr); err != nil {
 		return err
 	}
-	if err := sendFile(conn, payloads, encoding); err != nil {
+
+	// Barrier: wait 3 seconds for other connections, then send.
+	s.barrier.wait(conn, encoding)
+	if err := sendFile(conn, s.payloads, encoding); err != nil {
 		return err
 	}
 
@@ -103,7 +154,7 @@ func bomb(conn net.Conn, pAddr string, payloads *Payloads) error {
 	return nil
 }
 
-func Serve(ln net.Listener, pAddr string, payloads *Payloads) error {
+func (s *Server) Serve(ln net.Listener, pAddr string) error {
 	slog.Info("listening", "addr", ln.Addr().String(), "publish", pAddr)
 	for {
 		conn, err := ln.Accept()
@@ -112,7 +163,7 @@ func Serve(ln net.Listener, pAddr string, payloads *Payloads) error {
 			continue
 		}
 		go func() {
-			if err := bomb(conn, pAddr, payloads); err != nil {
+			if err := s.bomb(conn, pAddr); err != nil {
 				slog.Error("bomb error", "err", err)
 			}
 		}()

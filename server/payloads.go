@@ -70,8 +70,7 @@ func (p *Payloads) SelectFile(encoding string) string {
 		sizes = p.gzipSizes
 	}
 	size := sizes[rand.Intn(len(sizes))]
-	ext := extForEncoding(encoding)
-	return fmt.Sprintf("%dMB.%s", size, ext)
+	return fmt.Sprintf("%dMB.%s", size, extForEncoding(encoding))
 }
 
 func extForEncoding(encoding string) string {
@@ -107,8 +106,6 @@ func generatePayload(mb int, ext string, c func(io.Writer, int) error) error {
 	slog.Info("generated payload", "file", fn, "bytes", fi.Size())
 	return nil
 }
-
-type compressor func(io.Writer, int) error
 
 func gzipCompressor(w io.Writer, mb int) error {
 	gz, err := gzip.NewWriterLevel(w, gzip.BestCompression)
