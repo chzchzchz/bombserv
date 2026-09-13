@@ -19,19 +19,20 @@ type Server struct {
 }
 
 type barrier struct {
-	mu   sync.Mutex
-	done chan struct{}
+	mu       sync.Mutex
+	done     chan struct{}
+	waitTime time.Duration
 }
 
-func newBarrier() *barrier {
-	b := &barrier{done: make(chan struct{})}
+func newBarrier(waitTime time.Duration) *barrier {
+	b := &barrier{done: make(chan struct{}), waitTime: waitTime}
 	go b.monitor()
 	return b
 }
 
 func (b *barrier) monitor() {
 	for {
-		time.Sleep(3 * time.Second)
+		time.Sleep(b.waitTime)
 		c := b.done
 		nextc := make(chan struct{})
 		b.mu.Lock()
@@ -48,10 +49,10 @@ func (b *barrier) wait(conn net.Conn) {
 	<-done
 }
 
-func NewServer(payloads *Payloads, indexPath string) *Server {
+func NewServer(payloads *Payloads, indexPath string, barrierWait time.Duration) *Server {
 	return &Server{
 		payloads:  payloads,
-		barrier:   newBarrier(),
+		barrier:   newBarrier(barrierWait),
 		indexPath: indexPath,
 	}
 }
@@ -195,7 +196,7 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 		return err
 	}
 
-	// Barrier: wait 3 seconds for other connections, then send.
+	// Barrier: wait for other connections, then send.
 	var waitf func()
 	randomSleep := rand.Intn(5) == 0
 	if randomSleep {
