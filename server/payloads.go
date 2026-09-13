@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -13,47 +14,67 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+type payloadSpec struct {
+	mb   int
+	kind string
+	ext  string
+}
+
 type Payloads struct {
-	gzipSizes   []int
-	zstdSizes   []int
-	brotliSizes []int
-	last4       map[string][]byte
+	specs []payloadSpec
+	last4 map[string][]byte
 }
 
 func MakePayloads() *Payloads {
 	p := &Payloads{
-		gzipSizes:   []int{128, 256, 512},
-		zstdSizes:   []int{128, 256, 512, 1024, 2048, 4096, 8192},
-		brotliSizes: []int{128, 256, 512, 1024, 2048, 4096, 8192},
-		last4:       make(map[string][]byte),
+		last4: make(map[string][]byte),
+	}
+
+	gzipSizes := []int{128, 256, 512}
+	zstdSizes := []int{128, 256, 512, 1024, 2048, 4096, 8192}
+	brotliSizes := []int{128, 256, 512, 1024, 2048, 4096, 8192}
+
+	payloadConfigs := []struct {
+		sizes []int
+		ext   string
+	}{
+		{gzipSizes, "gz"},
+		{zstdSizes, "zst"},
+		{brotliSizes, "br"},
+	}
+
+	kinds := []string{"raw", "json"}
+
+	// Populate specs before spawning goroutines
+	for _, kind := range kinds {
+		for _, pc := range payloadConfigs {
+			for _, v := range pc.sizes {
+				p.specs = append(p.specs, payloadSpec{mb: v, kind: kind, ext: pc.ext})
+			}
+		}
 	}
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
 
-	payloadTypes := []struct {
-		sizes      []int
-		ext        string
-		compressor func(io.Writer, int) error
-	}{
-		{p.gzipSizes, "gz", gzipCompressor},
-		{p.zstdSizes, "zst", zstdCompressor},
-		{p.brotliSizes, "br", brotliCompressor},
-	}
-
-	for _, pt := range payloadTypes {
-		for _, v := range pt.sizes {
-			wg.Add(1)
-			go func(vv int) {
-				defer wg.Done()
-				sem <- struct{}{}
-				last4, err := generatePayload(vv, pt.ext, pt.compressor)
-				if err != nil {
-					panic(err)
-				}
-				p.last4[fmt.Sprintf("%dMB.%s", vv, pt.ext)] = last4
-				<-sem
-			}(v)
+	for _, kind := range kinds {
+		gen := contentGenerator(kind)
+		for _, pc := range payloadConfigs {
+			compressor := makeCompressor(pc.ext, gen)
+			for _, v := range pc.sizes {
+				wg.Add(1)
+				go func(vv int) {
+					defer wg.Done()
+					sem <- struct{}{}
+					last4, err := generatePayload(vv, kind, pc.ext, compressor)
+					if err != nil {
+						panic(err)
+					}
+					key := fmt.Sprintf("%dMB.%s.%s", vv, kind, pc.ext)
+					p.last4[key] = last4
+					<-sem
+				}(v)
+			}
 		}
 	}
 
@@ -62,38 +83,75 @@ func MakePayloads() *Payloads {
 	return p
 }
 
-func (p *Payloads) SelectFile(encoding string) string {
-	var sizes []int
-	switch encoding {
-	case "zstd":
-		sizes = p.zstdSizes
-	case "br":
-		sizes = p.brotliSizes
+func contentGenerator(kind string) func(io.Writer, int) error {
+	switch kind {
+	case "json":
+		return generateJSON
 	default:
-		sizes = p.gzipSizes
+		return fillPayload
 	}
-	size := sizes[rand.Intn(len(sizes))]
-	return fmt.Sprintf("%dMB.%s", size, extForEncoding(encoding))
 }
 
-func (p *Payloads) SelectPayload(encoding string) (trimFn string, last4 []byte) {
-	fn := p.SelectFile(encoding)
+func makeCompressor(ext string, gen func(io.Writer, int) error) func(io.Writer, int) error {
+	switch ext {
+	case "gz":
+		return func(w io.Writer, mb int) error {
+			gz, err := gzip.NewWriterLevel(w, gzip.BestCompression)
+			if err != nil {
+				return err
+			}
+			defer gz.Close()
+			if err := gen(gz, mb); err != nil {
+				return err
+			}
+			return gz.Flush()
+		}
+	case "zst":
+		return func(w io.Writer, mb int) error {
+			zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+			if err != nil {
+				return err
+			}
+			defer zw.Close()
+			if err := gen(zw, mb); err != nil {
+				return err
+			}
+			return nil
+		}
+	case "br":
+		return func(w io.Writer, mb int) error {
+			bw := brotli.NewWriterLevel(w, brotli.BestCompression)
+			defer bw.Close()
+			if err := gen(bw, mb); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+func (p *Payloads) SelectFile(encoding string, kind string) payloadSpec {
+	var candidates []payloadSpec
+	for _, sp := range p.specs {
+		if sp.ext == encoding && sp.kind == kind {
+			candidates = append(candidates, sp)
+		}
+	}
+	if len(candidates) == 0 {
+		return payloadSpec{}
+	}
+	return candidates[rand.Intn(len(candidates))]
+}
+
+func (p *Payloads) SelectPayload(encoding string, kind string) (trimFn string, last4 []byte) {
+	sp := p.SelectFile(encoding, kind)
+	fn := fmt.Sprintf("%dMB.%s.%s", sp.mb, sp.kind, sp.ext)
 	return fn + ".trim", p.last4[fn]
 }
 
-func extForEncoding(encoding string) string {
-	switch encoding {
-	case "zstd":
-		return "zst"
-	case "br":
-		return "br"
-	default:
-		return "gz"
-	}
-}
-
-func generatePayload(mb int, ext string, c func(io.Writer, int) error) ([]byte, error) {
-	fn := fmt.Sprintf("%dMB.%s", mb, ext)
+func generatePayload(mb int, kind string, ext string, c func(io.Writer, int) error) ([]byte, error) {
+	fn := fmt.Sprintf("%dMB.%s.%s", mb, kind, ext)
 	if _, err := os.Open(fn); err == nil {
 		return extractLast4(fn)
 	}
@@ -143,34 +201,7 @@ func extractLast4(fn string) ([]byte, error) {
 	return last4, nil
 }
 
-func gzipCompressor(w io.Writer, mb int) error {
-	gz, err := gzip.NewWriterLevel(w, gzip.BestCompression)
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-	fillPayload(gz, mb)
-	return gz.Flush()
-}
-
-func zstdCompressor(w io.Writer, mb int) error {
-	zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
-	if err != nil {
-		return err
-	}
-	defer zw.Close()
-	fillPayload(zw, mb)
-	return nil
-}
-
-func brotliCompressor(w io.Writer, mb int) error {
-	bw := brotli.NewWriterLevel(w, brotli.BestCompression)
-	defer bw.Close()
-	fillPayload(bw, mb)
-	return nil
-}
-
-func fillPayload(w io.Writer, mb int) {
+func fillPayload(w io.Writer, mb int) error {
 	trashWord, trashBuf := []byte("&#x1f33d;"), []byte("<html><head><title>")
 	for len(trashBuf) < 4096 {
 		trashBuf = append(trashBuf, trashWord...)
@@ -179,4 +210,25 @@ func fillPayload(w io.Writer, mb int) {
 		w.Write(trashBuf)
 	}
 	w.Write([]byte("</title></head><body><a href=\"http://corn.cash:8080/BOTS\">corn</a></body></html>"))
+	return nil
+}
+
+func generateJSON(w io.Writer, mb int) error {
+	n := mb * 1024 * 1024 / 8
+	if n < 1 {
+		n = 1
+	}
+	prefix := []byte("{\"a\":[")
+	core := []byte("{\"a\":[]}")
+	suffix := []byte("]}")
+
+	bw := bufio.NewWriter(w)
+	for i := 0; i < n-1; i++ {
+		bw.Write(prefix)
+	}
+	bw.Write(core)
+	for i := 0; i < n-1; i++ {
+		bw.Write(suffix)
+	}
+	return bw.Flush()
 }
