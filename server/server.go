@@ -57,24 +57,23 @@ func NewServer(payloads *Payloads, indexPath string, barrierWait time.Duration) 
 	}
 }
 
-func makeHeader(status, pAddr, tstr, encoding, contentType string) []byte {
+func makeHeader(status, pAddr, tstr, encoding, contentType string, contentLength int) []byte {
 	loc := ""
 	if pAddr != "" {
 		loc = fmt.Sprintf("Location: http://%s/%s\n", pAddr, tstr)
 	}
-	return []byte(fmt.Sprintf("HTTP/1.1 %s\n%sContent-Type: %s\r\nContent-Encoding: %s\n\n", status, loc, contentType, encoding))
+	return []byte(fmt.Sprintf("HTTP/1.1 %s\n%sContent-Type: %s\r\nContent-Encoding: %s\r\nContent-Length: %d\r\n\r\n", status, loc, contentType, encoding, contentLength))
 }
 
-func hdr200(encoding, contentType string) []byte {
-	return []byte(fmt.Sprintf("HTTP/1.1 200 OK\nContent-Type: %s\r\nContent-Encoding: %s\n\n", contentType, encoding))
+func hdr200(encoding, contentType string, contentLength int) []byte {
+	return []byte(fmt.Sprintf("HTTP/1.1 200 OK\nContent-Type: %s\r\nContent-Encoding: %s\r\nContent-Length: %d\r\n\r\n", contentType, encoding, contentLength))
 }
 
 func hdr302(pAddr string, tstr string, encoding, contentType string) []byte {
-	return makeHeader("302 Found", pAddr, tstr, encoding, contentType)
+	return makeHeader("302 Found", pAddr, tstr, encoding, contentType, 0)
 }
 
-func sendFile(conn net.Conn, payloads *Payloads, encoding string, kind string, waitf func()) error {
-	trimFn, last4 := payloads.SelectPayload(encoding, kind)
+func sendFile(conn net.Conn, trimFn string, last4 []byte, waitf func()) error {
 	f, err := os.Open(trimFn)
 	if err != nil {
 		return err
@@ -82,7 +81,6 @@ func sendFile(conn net.Conn, payloads *Payloads, encoding string, kind string, w
 	slog.Info("sending payload", "file", trimFn)
 	defer f.Close()
 	_, err = (conn.(*net.TCPConn)).ReadFrom(f)
-	f.Close()
 	if err != nil {
 		return err
 	}
@@ -107,7 +105,7 @@ func detectEncoding(buf []byte) string {
 	if idx == -1 {
 		return "gzip"
 	}
-	val := buf[idx+len("Accept-Encoding:"):]
+	val := buf[idx+len("Accept-Encoding"): ]
 	endIdx := bytes.IndexByte(val, '\n')
 	if endIdx == -1 {
 		endIdx = len(val)
@@ -231,11 +229,21 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 	// Stall some to pretend the client request is being processed.
 	time.Sleep(time.Duration((rand.Float64() + 0.01) * float64(time.Second)))
 
+	// Select payload to compute content length.
+	trimFn, last4 := s.payloads.SelectPayload(encodingToExt(encoding), kind)
+	tf, err := os.Open(trimFn)
+	if err != nil {
+		return err
+	}
+	fi, _ := tf.Stat()
+	tf.Close()
+	contentLength := int(fi.Size()) + len(last4)
+
 	// Randomly choose to redirect.
 	var hdr []byte
 	contentType := contentTypeForKind(kind)
 	if rand.Intn(2) == 0 {
-		hdr = hdr200(encoding, contentType)
+		hdr = hdr200(encoding, contentType, contentLength)
 		slog.Info("redirect", "addr", (conn.(*net.TCPConn)).RemoteAddr(), "type", "200", "encoding", encoding)
 	} else {
 		tstr := fmt.Sprintf("%v", time.Now().UnixNano())
@@ -255,7 +263,7 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 		waitf = func() { s.barrier.wait(conn) }
 	}
 
-	if err := sendFile(conn, s.payloads, encodingToExt(encoding), kind, waitf); err != nil {
+	if err := sendFile(conn, trimFn, last4, waitf); err != nil {
 		return err
 	}
 
