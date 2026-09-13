@@ -75,7 +75,7 @@ func hdr302(pAddr string, tstr string, encoding string) []byte {
 	return makeHeader("302 Found", pAddr, tstr, encoding)
 }
 
-func sendFile(conn net.Conn, payloads *Payloads, encoding string) error {
+func sendFile(conn net.Conn, payloads *Payloads, encoding string, waitf func()) error {
 	fn := payloads.SelectFile(encoding)
 	f, err := os.Open(fn)
 	if err != nil {
@@ -83,6 +83,7 @@ func sendFile(conn net.Conn, payloads *Payloads, encoding string) error {
 	}
 	slog.Info("sending payload", "file", fn)
 	defer f.Close()
+	waitf()
 	_, err = (conn.(*net.TCPConn)).ReadFrom(f)
 	return err
 }
@@ -142,14 +143,21 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 	}
 
 	// Barrier: wait 3 seconds for other connections, then send.
-	s.barrier.wait(conn, encoding)
-	if err := sendFile(conn, s.payloads, encoding); err != nil {
+	var waitf func()
+	randomSleep := rand.Intn(5) == 0
+	if randomSleep {
+		waitf = func() {}
+	} else {
+		waitf = func() { s.barrier.wait(conn, encoding) }
+	}
+
+	if err := sendFile(conn, s.payloads, encoding, waitf); err != nil {
 		return err
 	}
 
 	// Randomly sleep.
 	slog.Info("served", "addr", (conn.(*net.TCPConn)).RemoteAddr())
-	if rand.Intn(5) == 0 {
+	if randomSleep {
 		slog.Info("sleeping", "addr", (conn.(*net.TCPConn)).RemoteAddr())
 		time.Sleep(20 * time.Second)
 	}
