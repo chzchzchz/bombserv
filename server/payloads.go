@@ -27,31 +27,38 @@ func MakePayloads() *Payloads {
 	}
 
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
 	for _, v := range p.gzipSizes {
 		wg.Add(1)
 		go func(vv int) {
 			defer wg.Done()
+			sem <- struct{}{}
 			if err := generatePayload(vv, "gz", gzipCompressor); err != nil {
 				panic(err)
 			}
+			<-sem
 		}(v)
 	}
 	for _, v := range p.zstdSizes {
 		wg.Add(1)
 		go func(vv int) {
 			defer wg.Done()
+			sem <- struct{}{}
 			if err := generatePayload(vv, "zst", zstdCompressor); err != nil {
 				panic(err)
 			}
+			<-sem
 		}(v)
 	}
 	for _, v := range p.brotliSizes {
 		wg.Add(1)
 		go func(vv int) {
 			defer wg.Done()
+			sem <- struct{}{}
 			if err := generatePayload(vv, "br", brotliCompressor); err != nil {
 				panic(err)
 			}
+			<-sem
 		}(v)
 	}
 	wg.Wait()
