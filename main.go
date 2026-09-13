@@ -14,6 +14,7 @@ func main() {
 
 	laddrFlag := flag.String("l", ":8080", "listen address")
 	paddrFlag := flag.String("P", "corn.cash:8080", "publish address")
+	indexPathFlag := flag.String("index", "", "serve this file for GET / requests")
 	flag.Parse()
 
 	ln, err := net.Listen("tcp", *laddrFlag)
@@ -21,7 +22,7 @@ func main() {
 		panic(err)
 	}
 	payloads := server.MakePayloads()
-	svc := server.NewServer(payloads)
+	svc := server.NewServer(payloads, *indexPathFlag)
 	if err := svc.Serve(ln, *paddrFlag); err != nil {
 		panic(err)
 	}
