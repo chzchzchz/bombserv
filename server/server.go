@@ -1,35 +1,80 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
-var hdr200 = []byte("HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\r\nContent-Encoding: gzip\n\n")
+func makeHeader(status, pAddr, tstr, encoding string) []byte {
+	loc := ""
+	if pAddr != "" {
+		loc = fmt.Sprintf("Location: http://%s/%s\n", pAddr, tstr)
+	}
+	return []byte(fmt.Sprintf("HTTP/1.1 %s\n%sContent-Type: text/html\r\nContent-Encoding: %s\n\n", status, loc, encoding))
+}
 
-func sendFile(conn net.Conn) error {
-	fn := fmt.Sprintf("%dMB.gz", sizes[rand.Intn(len(sizes))])
+func hdr200(encoding string) []byte {
+	return []byte(fmt.Sprintf("HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\r\nContent-Encoding: %s\n\n", encoding))
+}
+
+func hdr302(pAddr string, tstr string, encoding string) []byte {
+	return makeHeader("302 Found", pAddr, tstr, encoding)
+}
+
+func sendFile(conn net.Conn, payloads *Payloads, encoding string) error {
+	fn := payloads.SelectFile(encoding)
 	f, err := os.Open(fn)
 	if err != nil {
 		return err
 	}
-	log.Println("sending payload", fn)
+	slog.Info("sending payload", "file", fn)
 	defer f.Close()
 	_, err = (conn.(*net.TCPConn)).ReadFrom(f)
 	return err
 }
 
-func bomb(conn net.Conn, pAddr string) error {
-	defer conn.Close()
-	log.Printf("serving %v", (conn.(*net.TCPConn)).RemoteAddr())
+func detectEncoding(buf []byte) string {
+	idx := bytes.Index(buf, []byte("Accept-Encoding:"))
+	if idx == -1 {
+		return "gzip"
+	}
+	val := buf[idx+len("Accept-Encoding:"):]
+	endIdx := bytes.IndexByte(val, '\n')
+	if endIdx == -1 {
+		endIdx = len(val)
+	}
+	if endIdx > 0 && val[endIdx-1] == '\r' {
+		endIdx--
+	}
+	for _, token := range strings.Split(strings.ToLower(string(val[:endIdx])), ",") {
+		token = strings.TrimSpace(token)
+		switch token {
+		case "zstd":
+			return "zstd"
+		case "br":
+			return "br"
+		case "gzip":
+			return "gzip"
+		}
+	}
+	return "gzip"
+}
 
-	// Show what the client sent over.
-	go io.Copy(os.Stdout, conn)
+func bomb(conn net.Conn, pAddr string, payloads *Payloads) error {
+	defer conn.Close()
+	slog.Info("serving", "addr", (conn.(*net.TCPConn)).RemoteAddr())
+
+	// Read up to 4096 bytes of HTTP headers to determine compression.
+	// Discarded — only the Accept-Encoding header is needed.
+	buf := make([]byte, 4096)
+	n, _ := conn.Read(buf)
+	encoding := detectEncoding(buf[:n])
 
 	// Stall some to pretend the client request is being processed.
 	time.Sleep(time.Duration((rand.Float64() + 0.01) * float64(time.Second)))
@@ -37,40 +82,38 @@ func bomb(conn net.Conn, pAddr string) error {
 	// Randomly choose to redirect.
 	var hdr []byte
 	if rand.Intn(5) == 0 {
-		hdr = hdr200
+		hdr = hdr200(encoding)
 	} else {
 		tstr := fmt.Sprintf("%v", time.Now().UnixNano())
-		hdr302 := []byte("HTTP/1.1 302 Found\nLocation: http://" +
-			pAddr + "/" + tstr + "\nContent-Type: text/html\r\nContent-Encoding: gzip\n\n")
-		hdr = hdr302
+		hdr = hdr302(pAddr, tstr, encoding)
 	}
 	if _, err := conn.Write(hdr); err != nil {
 		return err
 	}
-	if err := sendFile(conn); err != nil {
+	if err := sendFile(conn, payloads, encoding); err != nil {
 		return err
 	}
 
 	// Randomly sleep.
-	log.Printf("served %v", (conn.(*net.TCPConn)).RemoteAddr())
+	slog.Info("served", "addr", (conn.(*net.TCPConn)).RemoteAddr())
 	if rand.Intn(5) == 0 {
-		log.Printf("sleeping %v", (conn.(*net.TCPConn)).RemoteAddr())
+		slog.Info("sleeping", "addr", (conn.(*net.TCPConn)).RemoteAddr())
 		time.Sleep(20 * time.Second)
 	}
 	return nil
 }
 
-func Serve(ln net.Listener, pAddr string) error {
-	log.Println("listening on", ln.Addr().String(), "with publish address", pAddr)
+func Serve(ln net.Listener, pAddr string, payloads *Payloads) error {
+	slog.Info("listening", "addr", ln.Addr().String(), "publish", pAddr)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Println(err)
+			slog.Error("accept error", "err", err)
 			continue
 		}
 		go func() {
-			if err := bomb(conn, pAddr); err != nil {
-				log.Println("error:", err)
+			if err := bomb(conn, pAddr, payloads); err != nil {
+				slog.Error("bomb error", "err", err)
 			}
 		}()
 	}

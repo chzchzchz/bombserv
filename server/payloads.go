@@ -1,62 +1,149 @@
 package server
 
 import (
-	"bytes"
 	"compress/gzip"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
+	"math/rand"
 	"os"
 	"sync"
+
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 )
 
-var sizes = []int{128, 256, 512 /*, 1024, 2048, 4096, 8192*/}
+type Payloads struct {
+	gzipSizes   []int
+	zstdSizes   []int
+	brotliSizes []int
+}
 
-func MakePayloads() {
+func MakePayloads() *Payloads {
+	p := &Payloads{
+		gzipSizes:   []int{128, 256, 512},
+		zstdSizes:   []int{128, 256, 512, 1024, 2048, 4096, 8192},
+		brotliSizes: []int{128, 256, 512, 1024, 2048, 4096, 8192},
+	}
+
 	var wg sync.WaitGroup
-	wg.Add(len(sizes))
-	for _, v := range sizes {
+	for _, v := range p.gzipSizes {
+		wg.Add(1)
 		go func(vv int) {
 			defer wg.Done()
-			fn := fmt.Sprintf("%dMB.gz", vv)
-			if f, err := os.Open(fn); err == nil {
-				f.Close()
-				return
-			}
-			data := makePayload(vv)
-			f, err := os.Create(fn)
-			if err != nil {
+			if err := generatePayload(vv, "gz", gzipCompressor); err != nil {
 				panic(err)
 			}
-			defer f.Close()
-			if _, err = f.Write(data); err != nil {
+		}(v)
+	}
+	for _, v := range p.zstdSizes {
+		wg.Add(1)
+		go func(vv int) {
+			defer wg.Done()
+			if err := generatePayload(vv, "zst", zstdCompressor); err != nil {
+				panic(err)
+			}
+		}(v)
+	}
+	for _, v := range p.brotliSizes {
+		wg.Add(1)
+		go func(vv int) {
+			defer wg.Done()
+			if err := generatePayload(vv, "br", brotliCompressor); err != nil {
 				panic(err)
 			}
 		}(v)
 	}
 	wg.Wait()
-	log.Println("done generating payloads")
+	slog.Info("done generating payloads")
+	return p
 }
 
-func makePayload(mb int) []byte {
-	log.Printf("making payload size %dMB\n", mb)
-	var w bytes.Buffer
-	gz, err := gzip.NewWriterLevel(&w, gzip.BestCompression)
+func (p *Payloads) SelectFile(encoding string) string {
+	var sizes []int
+	switch encoding {
+	case "zstd":
+		sizes = p.zstdSizes
+	case "br":
+		sizes = p.brotliSizes
+	default:
+		sizes = p.gzipSizes
+	}
+	size := sizes[rand.Intn(len(sizes))]
+	ext := extForEncoding(encoding)
+	return fmt.Sprintf("%dMB.%s", size, ext)
+}
+
+func extForEncoding(encoding string) string {
+	switch encoding {
+	case "zstd":
+		return "zst"
+	case "br":
+		return "br"
+	default:
+		return "gz"
+	}
+}
+
+func generatePayload(mb int, ext string, c func(io.Writer, int) error) error {
+	fn := fmt.Sprintf("%dMB.%s", mb, ext)
+	if f, err := os.Open(fn); err == nil {
+		f.Close()
+		return nil
+	}
+	f, err := os.Create(fn)
 	if err != nil {
-		panic(err)
+		return err
+	}
+	if err := c(f, mb); err != nil {
+		f.Close()
+		return err
+	}
+	fi, err := f.Stat()
+	f.Close()
+	if err != nil {
+		return err
+	}
+	slog.Info("generated payload", "file", fn, "bytes", fi.Size())
+	return nil
+}
+
+type compressor func(io.Writer, int) error
+
+func gzipCompressor(w io.Writer, mb int) error {
+	gz, err := gzip.NewWriterLevel(w, gzip.BestCompression)
+	if err != nil {
+		return err
 	}
 	defer gz.Close()
-	// Fill up a page's worth + plus overflow.
+	fillPayload(gz, mb)
+	return gz.Flush()
+}
+
+func zstdCompressor(w io.Writer, mb int) error {
+	zw, err := zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if err != nil {
+		return err
+	}
+	defer zw.Close()
+	fillPayload(zw, mb)
+	return nil
+}
+
+func brotliCompressor(w io.Writer, mb int) error {
+	bw := brotli.NewWriterLevel(w, brotli.BestCompression)
+	defer bw.Close()
+	fillPayload(bw, mb)
+	return nil
+}
+
+func fillPayload(w io.Writer, mb int) {
 	trashWord, trashBuf := []byte("&#x1f33d;"), []byte("<html><head><title>")
 	for len(trashBuf) < 4096 {
 		trashBuf = append(trashBuf, trashWord...)
 	}
 	for i := 0; i < (mb*1024*1024)/4096; i++ {
-		gz.Write(trashBuf)
+		w.Write(trashBuf)
 	}
-	gz.Write([]byte("</title></head><body><a href=\"http://corn.cash:8080/BOTS\">corn</a></body></html>"))
-	if err := gz.Flush(); err != nil {
-		panic(err)
-	}
-	log.Printf("payload size %dMB: %d bytes\n", mb, len(w.Bytes()))
-	return w.Bytes()
+	w.Write([]byte("</title></head><body><a href=\"http://corn.cash:8080/BOTS\">corn</a></body></html>"))
 }

@@ -2,13 +2,15 @@ package main
 
 import (
 	"flag"
+	"log/slog"
 	"net"
+	"os"
 
 	"github.com/chzchzchz/bombserv/server"
 )
 
 func main() {
-	server.MakePayloads()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	laddrFlag := flag.String("l", ":8080", "listen address")
 	paddrFlag := flag.String("P", "corn.cash:8080", "publish address")
@@ -18,7 +20,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	if err := server.Serve(ln, *paddrFlag); err != nil {
+	payloads := server.MakePayloads()
+	if err := server.Serve(ln, *paddrFlag, payloads); err != nil {
 		panic(err)
 	}
 }

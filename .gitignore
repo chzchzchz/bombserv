@@ -1,2 +1,4 @@
 *.gz
+*.zst
+*.br
 bombserv
