@@ -119,9 +119,9 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 	slog.Info("serving", "addr", (conn.(*net.TCPConn)).RemoteAddr())
 
 	// Read up to 4096 bytes of HTTP headers to determine compression.
-	// Discarded — only the Accept-Encoding header is needed.
 	buf := make([]byte, 4096)
 	n, _ := conn.Read(buf)
+	slog.Info("headers", "addr", (conn.(*net.TCPConn)).RemoteAddr(), "data", string(buf[:n]))
 	encoding := detectEncoding(buf[:n])
 
 	// Stall some to pretend the client request is being processed.
@@ -129,11 +129,13 @@ func (s *Server) bomb(conn net.Conn, pAddr string) error {
 
 	// Randomly choose to redirect.
 	var hdr []byte
-	if rand.Intn(5) == 0 {
+	if rand.Intn(2) == 0 {
 		hdr = hdr200(encoding)
+		slog.Info("redirect", "addr", (conn.(*net.TCPConn)).RemoteAddr(), "type", "200", "encoding", encoding)
 	} else {
 		tstr := fmt.Sprintf("%v", time.Now().UnixNano())
 		hdr = hdr302(pAddr, tstr, encoding)
+		slog.Info("redirect", "addr", (conn.(*net.TCPConn)).RemoteAddr(), "type", "302", "encoding", encoding)
 	}
 	if _, err := conn.Write(hdr); err != nil {
 		return err
